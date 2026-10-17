@@ -164,16 +164,60 @@ const downloadBlob = (filename: string, blob: Blob): void => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
+/** audio formats the display plays */
+const AUDIO_EXTENSIONS = [".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac"];
+
+/** iphone and ipad (an ipad may report itself as a mac) */
+const isIos = (): boolean =>
+  /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+/** ios safari greys out mp3 and m4a files for audio/* so it gets no filter there */
+const acceptFilter = (accept: string): string => {
+  if (!accept.includes("audio/")) return accept;
+  return isIos() ? "" : `${accept},${AUDIO_EXTENSIONS.join(",")}`;
+};
+
+/** Whether a picked file matches an accept filter such as `audio/*` or `.json`. */
+export const fileMatches = (file: File, accept: string): boolean => {
+  const name = file.name.toLowerCase();
+  const type = file.type.toLowerCase();
+  return accept
+    .split(",")
+    .map((a) => a.trim().toLowerCase())
+    .filter(Boolean)
+    .some((a) => {
+      if (a === "*/*") return true;
+      if (a.startsWith(".")) return name.endsWith(a);
+      if (a === "audio/*" && AUDIO_EXTENSIONS.some((ext) => name.endsWith(ext))) return true;
+      return a.endsWith("/*") ? type.startsWith(a.slice(0, -1)) : type === a;
+    });
+};
+
 /** Let the user pick a file; resolves with null when cancelled. */
 export const pickFile = (accept: string): Promise<File | null> =>
   new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = accept;
-    input.addEventListener("change", () => resolve(input.files?.[0] ?? null), { once: true });
-    input.addEventListener("cancel", () => resolve(null), { once: true });
+    input.accept = acceptFilter(accept);
+    // mobile browsers may drop the change event of an input outside the document
+    input.style.display = "none";
+    document.body.appendChild(input);
+    const done = (file: File | null) => {
+      input.remove();
+      resolve(file);
+    };
+    input.addEventListener("change", () => done(input.files?.[0] ?? null), { once: true });
+    input.addEventListener("cancel", () => done(null), { once: true });
     input.click();
   });
+
+/** File content as base64 text. */
+export const fileBase64 = async (file: File): Promise<string> => {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+};
 
 export const slug = (value: string): string =>
   value

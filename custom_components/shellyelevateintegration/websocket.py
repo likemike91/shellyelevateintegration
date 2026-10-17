@@ -18,14 +18,20 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 import voluptuous as vol
 
 from .adb.apk import async_get_releases
-from .api import ShellyElevateIntegrationError
-from .api.app_schema import app_schema
+from .api import SettingDef, ShellyElevateIntegrationError
+from .api.app_schema import APP_RULES, app_schema
 from .const import DOMAIN, SIGNAL_SETTINGS_CHANGED, SIGNAL_SPEAKER, is_panel_entry
 from .device import ShellyElevateIntegrationConfigEntry, ShellyElevateIntegrationDevice
 from .ha_login import async_get_ha_login_manager
 from .installer import ProvisionOptions, async_provision, default_dashboard_url
 from .revert import RevertOptions, async_revert, async_revert_check
-from .services import async_apply_profile, async_copy_settings, async_export_payload, async_profile_diff
+from .services import (
+    async_apply_profile,
+    async_copy_settings,
+    async_export_payload,
+    async_profile_diff,
+    async_read_display_files,
+)
 from .settings import schema as schema_util
 from .settings.backups import async_get_backup_store
 from .settings.profiles import async_get_profile_manager
@@ -475,6 +481,8 @@ async def ws_profiles_list(hass: HomeAssistant, connection: ActiveConnection, ms
         vol.Optional("from_entry_id"): str,
         vol.Optional("keys"): [str],
         vol.Optional("make_default"): bool,
+        # new content of file settings, the file itself base64 encoded
+        vol.Optional("files"): {str: {vol.Required("name"): str, vol.Required("data_b64"): str}},
     }
 )
 async def ws_profiles_save(hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]) -> dict[str, Any]:
@@ -482,21 +490,54 @@ async def ws_profiles_save(hass: HomeAssistant, connection: ActiveConnection, ms
     manager = await async_get_profile_manager(hass)
     settings = dict(msg.get("settings") or {})
     schema = None
+    files = dict(msg.get("files") or {})
+    source: ShellyElevateIntegrationDevice | None = None
     if from_entry := msg.get("from_entry_id"):
-        device = _device(hass, from_entry)
-        await device.async_refresh_settings()
-        settings = {**device.settings, **settings}
-        schema = await device.async_get_schema()
+        source = _device(hass, from_entry)
+        await source.async_refresh_settings()
+        settings = {**source.settings, **settings}
+        schema = await source.async_get_schema()
     if keys := msg.get("keys"):
         settings = {k: v for k, v in settings.items() if k in keys}
+    if source is not None:
+        files = {**await async_read_display_files(source, settings), **files}
     profile_id = await manager.async_save_profile(
         msg["name"],
         settings,
         profile_id=msg.get("profile_id"),
         schema=schema,
         make_default=msg.get("make_default"),
+        files=files,
     )
     return {"profile_id": profile_id}
+
+
+@_cmd({vol.Required("type"): f"{DOMAIN}/profiles/schema"})
+async def ws_profiles_schema(hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]) -> dict[str, Any]:
+    """All settings a profile can hold: the schemas of the displays, or the rules of the current app."""
+    defs: dict[str, SettingDef] = {}
+    for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+        if is_panel_entry(entry):
+            continue
+        device: ShellyElevateIntegrationDevice = entry.runtime_data
+        if device.legacy or not device.available:
+            continue
+        for item in await device.async_get_schema() or ():
+            defs.setdefault(item.key, item)
+    manager = await async_get_profile_manager(hass)
+    if defs:
+        schema = list(defs.values())
+        await manager.async_remember_schema([item.as_dict() for item in schema])
+    elif manager.last_schema:
+        # labels and categories of the last schema beat the bare rules of the app
+        schema = [SettingDef.from_dict(item) for item in manager.last_schema]
+    else:
+        schema = app_schema({rule["key"] for rule in APP_RULES}, undescribed=False)
+    return {
+        "schema": [item.as_dict() for item in schema],
+        "per_device": sorted(schema_util.per_device_keys(schema)),
+        "secret": sorted(schema_util.secret_keys(schema)),
+    }
 
 
 @_cmd({vol.Required("type"): f"{DOMAIN}/profiles/delete", vol.Required("profile_id"): str})
@@ -680,6 +721,7 @@ def async_setup_websocket(hass: HomeAssistant) -> None:
         ws_backups_delete,
         ws_profiles_list,
         ws_profiles_save,
+        ws_profiles_schema,
         ws_profiles_delete,
         ws_profiles_default,
         ws_profiles_apply,

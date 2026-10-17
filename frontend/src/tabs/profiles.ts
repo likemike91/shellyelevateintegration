@@ -1,9 +1,11 @@
 import { LitElement, type PropertyValues, css, html, nothing } from "lit";
 import {
+  mdiCodeJson,
   mdiCogs,
   mdiDelete,
   mdiDotsVertical,
   mdiDownload,
+  mdiFormSelect,
   mdiPencil,
   mdiPlay,
   mdiPlus,
@@ -12,7 +14,17 @@ import {
   mdiStarOutline,
   mdiUpload,
 } from "@mdi/js";
-import { type DeviceSummary, ElevateApi, type Profile, type Settings, errorMessage, isLoaded, perDeviceKeys } from "../api";
+import {
+  type DeviceSummary,
+  ElevateApi,
+  type FileUpload,
+  type Profile,
+  type ProfileSchema,
+  type Settings,
+  errorMessage,
+  isLoaded,
+  perDeviceKeys,
+} from "../api";
 import {
   type DropdownSelectEvent,
   type HaFormSchema,
@@ -39,21 +51,53 @@ import {
 } from "../ui";
 import type { SeApplyProfileDialog } from "../components/apply-profile-dialog";
 import "../components/apply-profile-dialog";
+import type { FilePicked, ProfileSettingsChange, SeProfileSettings } from "../components/profile-settings";
+import "../components/profile-settings";
+
+type EditorMode = "visual" | "json";
 
 interface EditorState {
   profileId?: string;
   name: string;
+  mode: EditorMode;
+  /** The settings while the visual editor is open. */
+  settings: Settings;
+  /** The text while the JSON editor is open. */
   json: string;
+  /** Visual editor inputs that do not parse. */
+  invalid: string[];
   makeDefault: boolean;
   wasDefault: boolean;
+  /** Files the saved profile holds (key -> name). */
+  stored: Record<string, string>;
+  /** Files picked in this editor, sent on save. */
+  uploads: Record<string, FileUpload>;
 }
 
 const PROFILE_FORMAT = "shellyelevateintegration.profile/1";
+const MODE_KEY = "shellyelevate.profileEditorMode";
 
 const EDITOR_SCHEMA: HaFormSchema[] = [
   { name: "name", required: true, selector: { text: {} } },
   { name: "make_default", selector: { boolean: {} } },
 ];
+
+/** the editor opens in the mode used last */
+const savedMode = (): EditorMode => {
+  try {
+    return localStorage.getItem(MODE_KEY) === "json" ? "json" : "visual";
+  } catch {
+    return "visual";
+  }
+};
+
+const rememberMode = (mode: EditorMode): void => {
+  try {
+    localStorage.setItem(MODE_KEY, mode);
+  } catch {
+    // no storage: the editor opens visual next time
+  }
+};
 
 /** Parse the editor text -> settings or error message. */
 const parseSettings = (text: string): { settings?: Settings; error?: string } => {
@@ -69,6 +113,19 @@ const parseSettings = (text: string): { settings?: Settings; error?: string } =>
   } catch (err) {
     return { error: errorMessage(err) };
   }
+};
+
+/** The settings of the editor in either mode -> settings or error message. */
+const editorSettings = (ed: EditorState): { settings?: Settings; error?: string } => {
+  if (ed.mode === "json") return parseSettings(ed.json);
+  if (ed.invalid.length) return { settings: ed.settings, error: `Invalid values: ${ed.invalid.join(", ")}` };
+  return { settings: ed.settings };
+};
+
+/** Files of the file settings still in the profile (key -> name). */
+const editorFiles = (ed: EditorState, settings: Settings): Record<string, string> => {
+  const names = { ...ed.stored, ...Object.fromEntries(Object.entries(ed.uploads).map(([k, f]) => [k, f.name])) };
+  return Object.fromEntries(Object.entries(names).filter(([k]) => k in settings));
 };
 
 /**
@@ -96,7 +153,7 @@ const parseImport = (data: unknown, fileName: string): { settings: Settings; nam
   return { settings: data, name };
 };
 
-/** Profile list with JSON editor, import/export and "apply to displays". */
+/** Profile list with a visual and a JSON editor, import/export and "apply to displays". */
 export class SeProfilesTab extends LitElement {
   static properties = {
     page: { attribute: false },
@@ -112,6 +169,8 @@ export class SeProfilesTab extends LitElement {
     _fromEntry: { state: true },
     _fromBusy: { state: true },
     _busyId: { state: true },
+    _schema: { state: true },
+    _schemaError: { state: true },
   };
 
   declare page: PageContext;
@@ -128,6 +187,9 @@ export class SeProfilesTab extends LitElement {
   declare _fromEntry: string;
   declare _fromBusy: boolean;
   declare _busyId: string;
+  /** Every setting a profile can hold, loaded when the editor opens. */
+  declare _schema: ProfileSchema | null;
+  declare _schemaError: string;
 
   constructor() {
     super();
@@ -142,6 +204,8 @@ export class SeProfilesTab extends LitElement {
     this._fromEntry = "";
     this._fromBusy = false;
     this._busyId = "";
+    this._schema = null;
+    this._schemaError = "";
   }
 
   protected willUpdate(changed: PropertyValues<this>): void {
@@ -164,25 +228,38 @@ export class SeProfilesTab extends LitElement {
     }
   }
 
+  /** Read again each time the editor opens: displays may have been added or updated. */
+  private async _loadSchema(): Promise<void> {
+    try {
+      this._schema = await this.api.profilesSchema();
+      this._schemaError = "";
+    } catch (err) {
+      if (!this._schema) this._schemaError = errorMessage(err);
+    }
+  }
+
   // ------------------------------------------------------------------ actions
 
-  private _openEditor(state: EditorState): void {
+  private _openEditor(state: Omit<EditorState, "mode" | "json" | "invalid" | "uploads">): void {
     this._fromEntry = this.devices.find(isLoaded)?.entry_id ?? "";
-    this._editor = state;
+    this._editor = { ...state, mode: savedMode(), json: JSON.stringify(state.settings, null, 2), invalid: [], uploads: {} };
     this._editorOpen = true;
+    this._loadSchema();
+    this._resetVisual();
   }
 
   private _new(settings: Settings = {}, name = ""): void {
-    this._openEditor({ name, json: JSON.stringify(settings, null, 2), makeDefault: false, wasDefault: false });
+    this._openEditor({ name, settings, makeDefault: false, wasDefault: false, stored: {} });
   }
 
   private _edit(p: Profile): void {
     this._openEditor({
       profileId: p.id,
       name: p.name,
-      json: JSON.stringify(p.settings, null, 2),
+      settings: p.settings,
       makeDefault: p.default,
       wasDefault: p.default,
+      stored: Object.fromEntries(Object.entries(p.files ?? {}).map(([k, f]) => [k, f.name])),
     });
   }
 
@@ -190,9 +267,38 @@ export class SeProfilesTab extends LitElement {
     if (this._editor) this._editor = { ...this._editor, ...changes };
   }
 
+  /** Text typed in the visual editor belongs to the settings that were replaced. */
+  private async _resetVisual(): Promise<void> {
+    await this.updateComplete;
+    this.renderRoot.querySelector<SeProfileSettings>("sep-profile-settings")?.reset();
+  }
+
+  /** Replace the settings in whichever mode is open. */
+  private _replaceSettings(settings: Settings, changes: Partial<EditorState> = {}): void {
+    this._updateEditor({ ...changes, settings, json: JSON.stringify(settings, null, 2), invalid: [] });
+    this._resetVisual();
+  }
+
+  private _switchMode(mode: EditorMode): void {
+    const ed = this._editor;
+    if (!ed || ed.mode === mode) return;
+    if (mode === "json") {
+      this._updateEditor({ mode, json: JSON.stringify(ed.settings, null, 2), invalid: [] });
+    } else {
+      const parsed = parseSettings(ed.json);
+      if (!parsed.settings) {
+        toast(this, "Fix the JSON before switching to the visual editor", "error", parsed.error ? [parsed.error] : undefined);
+        return;
+      }
+      this._updateEditor({ mode, settings: parsed.settings, invalid: [] });
+      this._resetVisual();
+    }
+    rememberMode(mode);
+  }
+
   private async _fillFromDisplay(): Promise<void> {
     if (!this._editor || !this._fromEntry) return;
-    const current = parseSettings(this._editor.json);
+    const current = editorSettings(this._editor);
     if (current.settings && Object.keys(current.settings).length) {
       const ok = await confirmDialog(this, {
         title: "Replace the settings?",
@@ -203,18 +309,18 @@ export class SeProfilesTab extends LitElement {
     }
     this._fromBusy = true;
     try {
-      const data = await this.api.settingsGet(this._fromEntry);
+      const entryId = this._fromEntry;
+      const data = await this.api.settingsGet(entryId);
       const skip = perDeviceKeys(data);
       const settings = Object.fromEntries(
         Object.entries(data.settings)
           .filter(([k]) => !skip.has(k))
           .sort(([a], [b]) => a.localeCompare(b)),
       );
-      const name = this.devices.find((d) => d.entry_id === this._fromEntry)?.name;
-      this._updateEditor({
-        json: JSON.stringify(settings, null, 2),
-        name: this._editor?.name || (name ? `${name} profile` : ""),
-      });
+      const fileKeys = data.schema.filter((d) => d.accept && settings[d.key]).map((d) => d.key);
+      const uploads = await this._readDisplayFiles(entryId, fileKeys);
+      const name = this.devices.find((d) => d.entry_id === entryId)?.name;
+      this._replaceSettings(settings, { name: this._editor?.name || (name ? `${name} profile` : ""), uploads });
     } catch (err) {
       toastError(this, "Could not read the display", err);
     } finally {
@@ -222,19 +328,42 @@ export class SeProfilesTab extends LitElement {
     }
   }
 
+  /** The files behind the file settings of a display, so the profile can upload them later. */
+  private async _readDisplayFiles(entryId: string, keys: string[]): Promise<Record<string, FileUpload>> {
+    const uploads: Record<string, FileUpload> = {};
+    const missing: string[] = [];
+    for (const key of keys) {
+      try {
+        const result = (await this.api.command([entryId], "settings.file_read", { key }))[entryId];
+        const data = result?.ok ? (result.data as { name?: string; data_b64?: string | null } | null) : null;
+        if (data?.data_b64) uploads[key] = { name: data.name || key, data_b64: data.data_b64 };
+        else missing.push(key);
+      } catch {
+        missing.push(key);
+      }
+    }
+    if (missing.length) {
+      toast(this, "The display could not send some files – upload them in the profile", "warning", missing);
+    }
+    return uploads;
+  }
+
   private async _saveEditor(): Promise<void> {
     const ed = this._editor;
     if (!ed) return;
-    const parsed = parseSettings(ed.json);
+    const parsed = editorSettings(ed);
     const name = ed.name.trim();
-    if (!parsed.settings || !name) return;
+    if (!parsed.settings || parsed.error || !name) return;
+    const settings = parsed.settings;
+    const files = Object.fromEntries(Object.entries(ed.uploads).filter(([k]) => k in settings));
     this._saving = true;
     try {
       await this.api.profilesSave({
         profile_id: ed.profileId,
         name,
-        settings: parsed.settings,
+        settings,
         make_default: makeDefaultParam(ed),
+        files: Object.keys(files).length ? files : undefined,
       });
       toast(this, `Profile “${name}” saved`, "success");
       this._editorOpen = false;
@@ -347,10 +476,41 @@ export class SeProfilesTab extends LitElement {
     </div>`;
   }
 
+  /** "Settings" with the switch between the visual and the JSON editor, like the dashboard card editor. */
+  private _renderModeSwitch(ed: EditorState) {
+    const json = ed.mode === "json";
+    return html`<div class="editor-head">
+      <span>Settings</span>
+      <ha-button appearance="plain" size="s" @click=${() => this._switchMode(json ? "visual" : "json")}>
+        <ha-svg-icon slot="start" .path=${json ? mdiFormSelect : mdiCodeJson}></ha-svg-icon>
+        ${json ? "Edit visually" : "Edit as JSON"}
+      </ha-button>
+    </div>`;
+  }
+
+  private _renderVisualEditor(ed: EditorState) {
+    if (!this._schema) {
+      return this._schemaError
+        ? html`<ha-alert alert-type="error" title="Could not load the settings">${this._schemaError}</ha-alert>`
+        : html`<div class="loading"><ha-spinner size="small"></ha-spinner></div>`;
+    }
+    return html`<sep-profile-settings
+      .schema=${this._schema.schema}
+      .perDevice=${new Set(this._schema.per_device)}
+      .secret=${new Set(this._schema.secret)}
+      .settings=${ed.settings}
+      .files=${editorFiles(ed, ed.settings)}
+      @settings-changed=${(e: CustomEvent<ProfileSettingsChange>) =>
+        this._updateEditor({ settings: e.detail.settings, invalid: e.detail.invalid })}
+      @file-picked=${(e: CustomEvent<FilePicked>) =>
+        this._updateEditor({ uploads: { ...(this._editor?.uploads ?? {}), [e.detail.key]: e.detail.file } })}
+    ></sep-profile-settings>`;
+  }
+
   private _renderJsonEditor(ed: EditorState, parsed: ReturnType<typeof parseSettings>) {
     const count = parsed.settings ? Object.keys(parsed.settings).length : 0;
+    const files = parsed.settings ? Object.entries(editorFiles(ed, parsed.settings)) : [];
     return html`<div>
-      <div class="editor-label">Settings (JSON)</div>
       ${isDefined("ha-code-editor")
         ? html`<ha-code-editor
             mode="yaml"
@@ -373,12 +533,17 @@ export class SeProfilesTab extends LitElement {
       <div class="hint ${parsed.error ? "error" : "secondary"}">
         ${parsed.error ? parsed.error : html`Valid JSON · ${plural(count, "setting")}. Per-display settings are removed when saving.`}
       </div>
+      ${files.length
+        ? html`<div class="hint secondary">
+            Files: ${files.map(([k, n]) => `${n} (${k})`).join(", ")}. Upload or replace files in the visual editor.
+          </div>`
+        : nothing}
     </div>`;
   }
 
   private _renderEditor() {
     const ed = this._editor;
-    const parsed = ed ? parseSettings(ed.json) : {};
+    const parsed = ed ? editorSettings(ed) : {};
     return html`
       <ha-dialog
         .open=${this._editorOpen}
@@ -405,7 +570,11 @@ export class SeProfilesTab extends LitElement {
                     this._updateEditor({ name: e.detail.value.name ?? "", makeDefault: !!e.detail.value.make_default });
                   }}
                 ></ha-form>
-                ${this._renderFromDisplay()} ${this._renderJsonEditor(ed, parsed)}
+                ${this._renderFromDisplay()}
+                <div>
+                  ${this._renderModeSwitch(ed)}
+                  ${ed.mode === "json" ? this._renderJsonEditor(ed, parsed) : this._renderVisualEditor(ed)}
+                </div>
               </div>
             `
           : nothing}
@@ -428,6 +597,7 @@ export class SeProfilesTab extends LitElement {
 
   private _renderProfile(p: Profile) {
     const busy = this._busyId === p.id;
+    const files = Object.keys(p.files ?? {}).length;
     return html`
       <ha-list-item-button @click=${() => this._edit(p)}>
         <ha-svg-icon slot="start" .path=${mdiCogs}></ha-svg-icon>
@@ -435,7 +605,8 @@ export class SeProfilesTab extends LitElement {
           ${p.name} ${p.default ? html`<ha-svg-icon .path=${mdiStar} title="Default profile" role="img" aria-label="Default profile"></ha-svg-icon>` : nothing}
         </span>
         <span slot="supporting-text">
-          ${plural(Object.keys(p.settings ?? {}).length, "setting")} · Updated ${formatDate(p.updated ?? p.created, this._lang)}
+          ${plural(Object.keys(p.settings ?? {}).length, "setting")}${files ? ` · ${plural(files, "file")}` : ""} · Updated
+          ${formatDate(p.updated ?? p.created, this._lang)}
         </span>
         ${busy ? html`<ha-spinner slot="end" size="small"></ha-spinner>` : nothing}
         <ha-dropdown
@@ -546,7 +717,10 @@ export class SeProfilesTab extends LitElement {
         flex: 1;
         min-width: 0;
       }
-      .editor-label {
+      .editor-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         margin-bottom: var(--ha-space-2);
       }
       ha-code-editor {

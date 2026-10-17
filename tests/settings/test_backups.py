@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -145,6 +147,68 @@ async def test_profiles(hass: HomeAssistant, hass_storage: dict[str, Any]) -> No
     assert reloaded.profiles == {}
 
 
+async def test_profile_files(hass: HomeAssistant) -> None:
+    """A profile keeps the file of a file setting, uploads it and drops a name without a file."""
+    manager = await async_get_profile_manager(hass)
+    key = "voiceThinkingSoundFile"
+    folder = Path(hass.config.path(".storage", "shellyelevateintegration.profile_files"))
+    pid = await manager.async_save_profile(
+        "Voice",
+        {"voiceThinkingSound": True, key: "stale.mp3"},
+        files={key: {"name": " hmm.mp3 ", "data_b64": base64.b64encode(b"ID3sound").decode()}},
+    )
+    profile = manager.profiles[pid]
+    assert profile["settings"] == {"voiceThinkingSound": True, key: "hmm.mp3"}
+    assert profile["files"] == {key: {"name": "hmm.mp3", "size": 8}}
+    assert (folder / pid / key).read_bytes() == b"ID3sound"
+    assert manager.files(pid) == {key: "hmm.mp3"}
+
+    # saving again keeps the file and its name
+    await manager.async_save_profile("Voice", {"voiceThinkingSound": True, key: "other.mp3"}, profile_id=pid)
+    assert manager.profiles[pid]["settings"][key] == "hmm.mp3"
+
+    sent: list[tuple[str, dict[str, Any]]] = []
+
+    async def send(action: str, **params: Any) -> dict[str, Any]:
+        sent.append((action, params))
+        return {}
+
+    await manager.async_upload_files(pid, {"voiceThinkingSound"}, send)
+    assert sent == []
+    await manager.async_upload_files(pid, {key}, send)
+    assert sent == [
+        ("settings.file", {"key": key, "name": "hmm.mp3", "data_b64": base64.b64encode(b"ID3sound").decode()})
+    ]
+
+    # a file setting without a file cannot be applied
+    other = await manager.async_save_profile("Name only", {key: "x.mp3", "a": 1})
+    assert manager.profiles[other]["settings"] == {"a": 1}
+    assert "files" not in manager.profiles[other]
+
+    for bad in (
+        {"name": "a", "data_b64": "not base64!"},
+        {"name": "a", "data_b64": ""},
+        ("big", b"x" * (512 * 1024 + 1)),
+    ):
+        with pytest.raises(HomeAssistantError) as err:
+            await manager.async_save_profile("Bad", {}, files={key: bad})
+        assert err.value.translation_key == "profile_file_invalid"
+
+    # the setting left the profile: so does its file
+    await manager.async_save_profile("Voice", {"voiceThinkingSound": True}, profile_id=pid)
+    assert "files" not in manager.profiles[pid]
+    assert not (folder / pid / key).exists()
+
+    await manager.async_save_profile("Voice", {}, profile_id=pid, files={key: ("b.wav", b"RIFF")})
+    (folder / pid / key).unlink()
+    with pytest.raises(HomeAssistantError) as err:
+        await manager.async_upload_files(pid, {key}, send)
+    assert err.value.translation_key == "profile_file_missing"
+    await manager.async_save_profile("Voice", {key: "b.wav"}, profile_id=pid, files={key: ("b.wav", b"RIFF")})
+    await manager.async_delete(pid)
+    assert not (folder / pid).exists()
+
+
 def test_schema_helpers() -> None:
     """Per-device and secret keys with and without a schema."""
     schema = [
@@ -154,6 +218,12 @@ def test_schema_helpers() -> None:
     assert "token" in schema_util.secret_keys(schema)
     assert "mqttPassword" in schema_util.secret_keys(None)
     assert schema_util.portable({"name": 1, "a": 2, "mqttDeviceId": 3}, schema) == {"a": 2}
+    # a file setting is only a name, the file stays on its display
+    assert schema_util.portable({"a": 2, "voiceThinkingSoundFile": "x.mp3"}, None) == {"a": 2}
+    assert schema_util.file_keys([SettingDef(key="pic", type="string", accept="image/*")]) >= {
+        "pic",
+        "voiceThinkingSoundFile",
+    }
     assert schema_util.redact({"token": "x", "mqttPassword": "", "a": 1}, schema) == {
         "token": "**REDACTED**",
         "mqttPassword": "",

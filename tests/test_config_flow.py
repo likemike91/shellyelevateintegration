@@ -476,6 +476,28 @@ async def test_profile_applied_to_new_display(
     assert (client.token, client.fingerprint) == (TOKEN, FINGERPRINT)
 
 
+async def test_profile_files_uploaded(
+    hass: HomeAssistant, panel: MockConfigEntry, display: FakeDisplay, flow_mocks: dict
+) -> None:
+    """The thinking sound of a profile is uploaded, its name is not written alone; a failed upload only logs."""
+    manager = await async_get_profile_manager(hass)
+    key = "voiceThinkingSoundFile"
+    await manager.async_save_profile(
+        "Voice", {"voiceThinkingSound": True}, profile_id="voice", files={key: ("hmm.mp3", b"ID3")}
+    )
+    result = await _pair(hass, await _at_pair(hass))
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_PROFILE: "voice"})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert display.writes == [{"voiceThinkingSound": True}]
+    assert ("settings.file", {"key": key, "name": "hmm.mp3", "data_b64": "SUQz"}) in display.commands
+
+    display.command_errors["settings.file"] = ShellyElevateIntegrationCommandError("invalid")
+    await hass.config_entries.async_remove(result["result"].entry_id)
+    result = await _pair(hass, await _at_pair(hass))
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_PROFILE: "voice"})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
 @pytest.mark.usefixtures("profiles")
 async def test_profile_decides_features(
     hass: HomeAssistant, panel: MockConfigEntry, display: FakeDisplay, flow_mocks: dict

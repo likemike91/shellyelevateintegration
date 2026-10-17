@@ -127,9 +127,14 @@ async def async_provision(hass: HomeAssistant, options: ProvisionOptions, progre
         )
 
     settings: dict[str, Any] = {}
+    profile_files: dict[str, str] = {}
+    manager = await async_get_profile_manager(hass)
     if options.profile_id:
-        manager = await async_get_profile_manager(hass)
-        settings.update(manager.settings_for_device(options.profile_id, None))
+        profile_files = manager.files(options.profile_id)
+        # file settings follow with their file once the app is paired
+        settings.update(
+            {k: v for k, v in manager.settings_for_device(options.profile_id, None).items() if k not in profile_files}
+        )
     if options.dashboard_url:
         settings["webviewUrl"] = options.dashboard_url
     # ADB stays usable for updates and rescue
@@ -160,6 +165,11 @@ async def async_provision(hass: HomeAssistant, options: ProvisionOptions, progre
             # ADB over TCP is not encrypted: a token that crossed it is replaced at once over TLS.
             token = await client.rotate_token()
             data |= {CONF_TOKEN: token, CONF_FINGERPRINT: fingerprint}
+            if options.profile_id and profile_files:
+                try:
+                    await manager.async_upload_files(options.profile_id, set(profile_files), client.command)
+                except (ShellyElevateIntegrationError, HomeAssistantError) as err:
+                    _LOGGER.warning("Could not upload the profile files to %s: %s", options.host, err)
     except (ShellyElevateIntegrationError, HomeAssistantError) as err:
         progress("provision", {"status": "failed", "error": str(err)})
         raise

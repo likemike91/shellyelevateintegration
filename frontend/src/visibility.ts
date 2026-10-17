@@ -163,7 +163,8 @@ const dedupe = <T>(items: T[]): T[] => {
 const optionLabel = (parent: SettingDef | undefined, value: unknown): string =>
   parent?.options?.find((o) => sameValue(o.value, value, true))?.label ?? formatValue(value);
 
-const describe = ({ cond, parent }: FailedCondition): string => {
+/** A condition in words ("Screensaver is on"). */
+export const describeCondition = ({ cond, parent }: FailedCondition): string => {
   const label = parent?.label || cond.key;
   if ("eq" in cond) {
     if (typeof cond.eq === "boolean") return `${label} is ${cond.eq ? "on" : "off"}`;
@@ -180,5 +181,5 @@ const describe = ({ cond, parent }: FailedCondition): string => {
 export const visibilityHint = (vis: Visibility): string => {
   if (vis.visible) return "";
   if (vis.missing.length || vis.unreachable || !vis.failed.length) return "Not available on this display";
-  return `Shown when ${vis.failed.map(describe).join(" and ")}`;
+  return `Shown when ${vis.failed.map(describeCondition).join(" and ")}`;
 };

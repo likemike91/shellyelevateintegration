@@ -157,6 +157,21 @@ export interface Profile {
   created?: string;
   updated?: string;
   default: boolean;
+  /** Files of file settings the profile uploads when it is applied (key -> file). */
+  files?: Record<string, { name: string; size: number }>;
+}
+
+/** A file picked in the panel, sent base64 encoded. */
+export interface FileUpload {
+  name: string;
+  data_b64: string;
+}
+
+/** Every setting a profile can hold (the schemas of the displays, or the rules of the current app). */
+export interface ProfileSchema {
+  schema: SettingDef[];
+  per_device: string[];
+  secret: string[];
 }
 
 export interface Backup {
@@ -479,6 +494,10 @@ export class ElevateApi {
     return this.ws("profiles/list");
   }
 
+  profilesSchema(): Promise<ProfileSchema> {
+    return this.ws("profiles/schema");
+  }
+
   async profilesSave(params: {
     name: string;
     profile_id?: string;
@@ -486,6 +505,8 @@ export class ElevateApi {
     from_entry_id?: string;
     keys?: string[];
     make_default?: boolean;
+    /** New content of file settings. */
+    files?: Record<string, FileUpload>;
   }): Promise<string> {
     const clean = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined));
     return (await this.ws<{ profile_id: string }>("profiles/save", clean)).profile_id;

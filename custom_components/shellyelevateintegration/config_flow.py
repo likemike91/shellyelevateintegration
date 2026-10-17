@@ -18,6 +18,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import instance_id, selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
@@ -466,10 +467,18 @@ class ShellyElevateIntegrationConfigFlow(ConfigFlow, domain=DOMAIN):
             if schema:
                 known &= {item.key for item in schema}
         changes = manager.settings_for_device(profile_id, schema, known)
+        files = manager.files(profile_id)
+        if plain := {k: v for k, v in changes.items() if k not in files}:
+            await client.set_settings(plain)
         if changes:
-            await client.set_settings(changes)
             # the profile decides these so the first setup must not turn them on
             self._features_handled |= AUTO_FEATURES & set(changes)
+        if not self._hello.legacy:
+            # a file setting only changes with its file
+            try:
+                await manager.async_upload_files(profile_id, changes, client.command)
+            except (ShellyElevateIntegrationError, HomeAssistantError) as err:
+                _LOGGER.warning("Could not upload the profile files to %s: %s", self._host, err)
 
     def _client(self) -> ShellyElevateIntegrationApi:
         assert self._hello is not None

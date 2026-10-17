@@ -569,6 +569,12 @@
     "cannot_connect": {
       "message": "Could not connect to the display at {host}."
     },
+    "profile_file_invalid": {
+      "message": "The file for {key} must be 1 byte to 512 KB."
+    },
+    "profile_file_missing": {
+      "message": "The file for {key} of profile {profile} is missing. Upload it again."
+    },
     "profile_not_found": {
       "message": "Profile {profile} not found."
     },

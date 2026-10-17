@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -225,6 +226,70 @@ async def test_profiles(hass: HomeAssistant, init_integration: MockConfigEntry, 
 
     assert (await ws("profiles/delete", profile_id=saved))["success"]
     assert (await ws("profiles/delete", profile_id=saved))["error"]["code"] == "failed"
+
+
+async def test_profile_files(hass: HomeAssistant, init_integration: MockConfigEntry, display: FakeDisplay, ws) -> None:
+    """A profile with a thinking sound uploads the file instead of writing its name."""
+    entry_id = init_integration.entry_id
+    key = "voiceThinkingSoundFile"
+    sound = base64.b64encode(b"ID3sound").decode()
+    saved = await ws(
+        "profiles/save",
+        name="Voice",
+        settings={"voiceThinkingSound": True, key: "hmm.mp3"},
+        files={key: {"name": "hmm.mp3", "data_b64": sound}},
+    )
+    profile_id = saved["result"]["profile_id"]
+    listed = (await ws("profiles/list"))["result"]["profiles"]
+    assert listed[0]["files"] == {key: {"name": "hmm.mp3", "size": 8}}
+
+    dry = (await ws("profiles/apply", profile_id=profile_id, entry_ids=[entry_id], dry_run=True))["result"]
+    assert dry["results"][entry_id] == [
+        {"key": "voiceThinkingSound", "current": False, "new": True},
+        {"key": key, "current": "", "new": "hmm.mp3"},
+    ]
+    assert (await ws("profiles/apply", profile_id=profile_id, entry_ids=[entry_id]))["success"]
+    assert display.writes == [{"voiceThinkingSound": True}]
+    assert ("settings.file", {"key": key, "name": "hmm.mp3", "data_b64": sound}) in display.commands
+
+    # saved from a display the profile takes the file along
+    display.settings[key] = "own.mp3"
+    display.command_results["settings.file_read"] = {"name": "own.mp3", "data_b64": sound}
+    copy_id = (await ws("profiles/save", name="Copy", from_entry_id=entry_id, keys=[key]))["result"]["profile_id"]
+    manager = await async_get_profile_manager(hass)
+    assert manager.profiles[copy_id]["settings"] == {key: "own.mp3"}
+    assert ("settings.file_read", {"key": key}) in display.commands
+    # an app without settings.file_read: the name alone is left out
+    display.command_errors["settings.file_read"] = ShellyElevateIntegrationCommandError("unknown_action", "no")
+    older = (await ws("profiles/save", name="Older", from_entry_id=entry_id, keys=[key]))["result"]["profile_id"]
+    assert manager.profiles[older]["settings"] == {}
+
+    bad = await ws("profiles/save", name="Bad", settings={}, files={key: {"name": "x", "data_b64": ""}})
+    assert bad["error"]["code"] == "failed"
+
+
+async def test_profiles_schema(hass: HomeAssistant, init_integration: MockConfigEntry, ws) -> None:
+    """The profile editor gets the schema of the displays, or the rules of the app without one."""
+    result = (await ws("profiles/schema"))["result"]
+    by_key = {item["key"]: item for item in result["schema"]}
+    assert by_key["voiceThinkingSoundFile"]["accept"] == "audio/*"
+    assert by_key["screenSaverDelay"]["max"] == 86400
+    assert "mqttDeviceId" in result["per_device"]
+    assert "mqttPassword" in result["secret"]
+
+    offline = patch.object(
+        type(init_integration.runtime_data), "available", new_callable=PropertyMock, return_value=False
+    )
+    with offline:
+        remembered = (await ws("profiles/schema"))["result"]
+    assert remembered["schema"] == result["schema"]
+
+    (await async_get_profile_manager(hass)).last_schema = None
+    with offline:
+        fallback = (await ws("profiles/schema"))["result"]
+    by_key = {item["key"]: item for item in fallback["schema"]}
+    assert by_key["screenSaverDelay"].get("max") is None
+    assert by_key["voiceThinkingSoundFile"]["accept"] == "audio/*"
 
 
 async def test_installer_info(hass: HomeAssistant, ws) -> None:

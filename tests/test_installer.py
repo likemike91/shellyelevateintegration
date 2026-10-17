@@ -111,6 +111,26 @@ async def test_provision_new_display(
         assert _status(events, step) == "done", step
 
 
+async def test_provision_profile_files(
+    hass: HomeAssistant, display: FakeDisplay, adb: MagicMock, probe: AsyncMock
+) -> None:
+    """A profile file goes over TLS once the app is paired, never as a bare name over ADB."""
+    manager = await async_get_profile_manager(hass)
+    key = "voiceThinkingSoundFile"
+    await manager.async_save_profile(
+        "Voice", {"voiceThinkingSound": True}, profile_id="voice", files={key: ("hmm.mp3", b"ID3")}
+    )
+    display.command_errors["settings.file"] = ShellyElevateIntegrationConnectionError("gone")
+    _events, progress = _recorder()
+    # a failed upload does not fail the install
+    await async_provision(hass, ProvisionOptions(host=HOST, profile_id="voice"), progress)
+    await hass.async_block_till_done()
+    settings = adb.async_provision.await_args.args[3]
+    assert settings["voiceThinkingSound"] is True
+    assert key not in settings
+    assert ("settings.file", {"key": key, "name": "hmm.mp3", "data_b64": "SUQz"}) in display.commands
+
+
 async def test_provision_existing_display(
     hass: HomeAssistant, init_integration: MockConfigEntry, display: FakeDisplay, adb: MagicMock, probe: AsyncMock
 ) -> None:

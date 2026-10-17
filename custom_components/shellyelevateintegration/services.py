@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Iterable
 from datetime import UTC, datetime
+import logging
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntryState
@@ -20,7 +21,9 @@ from .device import ShellyElevateIntegrationConfigEntry, ShellyElevateIntegratio
 from .revert import RevertOptions, async_revert
 from .settings import schema as schema_util
 from .settings.backups import REASON_BEFORE_PROFILE, BackupManager
-from .settings.profiles import async_get_profile_manager
+from .settings.profiles import FileUpload, async_get_profile_manager
+
+_LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     # ha 2026.9+ aliases voluptuous to probatio at runtime
@@ -116,11 +119,37 @@ async def async_apply_profile(
 ) -> list[dict[str, Any]]:
     """Apply a profile to a display; returns the applied changes."""
     manager = await async_get_profile_manager(hass)
-    changes = await async_profile_diff(hass, device, manager.find(profile))
+    profile_id = manager.find(profile)
+    changes = await async_profile_diff(hass, device, profile_id)
     if changes:
         _backups(device).snapshot(REASON_BEFORE_PROFILE)
-        await device.async_set_settings({item["key"]: item["new"] for item in changes})
+        files = manager.files(profile_id)
+        if plain := {item["key"]: item["new"] for item in changes if item["key"] not in files}:
+            await device.async_set_settings(plain)
+        # a file setting only changes with its file
+        await manager.async_upload_files(profile_id, {item["key"] for item in changes}, device.async_command)
     return changes
+
+
+async def async_read_display_files(
+    device: ShellyElevateIntegrationDevice, settings: dict[str, Any]
+) -> dict[str, FileUpload]:
+    """The files behind the file settings in `settings`, read from the display.
+
+    Apps without `settings.file_read` give none; the profile then leaves those settings out.
+    """
+    files: dict[str, FileUpload] = {}
+    for key in schema_util.file_keys(await device.async_get_schema()):
+        if not settings.get(key) or device.legacy:
+            continue
+        try:
+            result = await device.async_command("settings.file_read", key=key)
+        except HomeAssistantError as err:
+            _LOGGER.debug("Could not read %s from %s: %s", key, device.entry.title, err)
+            continue
+        if result.get("data_b64"):
+            files[key] = {"name": result.get("name") or settings[key], "data_b64": result["data_b64"]}
+    return files
 
 
 async def async_profile_diff(
@@ -219,6 +248,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
             profile_id=existing,
             schema=await device.async_get_schema(),
             make_default=call.data.get(ATTR_MAKE_DEFAULT),
+            files=await async_read_display_files(device, settings),
         )
         return {"profile_id": profile_id}
 

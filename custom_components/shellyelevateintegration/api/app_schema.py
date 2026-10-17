@@ -180,6 +180,7 @@ def with_app_rules(schema: list[SettingDef]) -> list[SettingDef]:
         item.requires = _copy(rule.get("requires")) or None
         item.hidden = item.hidden or bool(rule.get("hidden"))
         item.read_only = item.read_only or bool(rule.get("read_only"))
+        item.accept = item.accept or rule.get("accept")
     return schema
 
 

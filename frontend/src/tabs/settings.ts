@@ -13,91 +13,36 @@ import {
 } from "../api";
 import {
   type HaFormSchema,
-  type SelectedEvent,
   type UnsubscribeFunc,
   type ValueChangedEvent,
   fireEvent,
   inputValue,
-  isChecked,
   isDefined,
   onDialogClosed,
 } from "../ha";
 import { type PageContext, type PageMenu, displayPicker, noDisplaysCard, pageStyles, renderPage } from "../page";
 import { dialogStyles, sharedStyles } from "../styles";
+import { confirmDialog, define, downloadJson, plural, selectEntry, slug, toast, toastError } from "../ui";
 import {
-  confirmDialog,
-  define,
-  downloadJson,
-  formatValue,
-  pickFile,
-  plural,
-  selectEntry,
-  slug,
-  toast,
-  toastError,
-} from "../ui";
-
-/** the display takes at most 512 KB per file */
-const MAX_UPLOAD = 512 * 1024;
+  categoryLabel,
+  categoryRank,
+  parseText,
+  pickUpload,
+  rangeText,
+  renderSettingControl,
+  same,
+  settingRowStyles,
+} from "../setting-controls";
 import type { KeyOption } from "../components/key-picker";
 import "../components/key-picker";
 import { type Visibility, VisibilityEvaluator, visibilityHint } from "../visibility";
 
-const CATEGORY_LABELS: Record<string, string> = {
-  general: "General",
-  display: "Display",
-  screensaver: "Screensaver",
-  inputs: "Inputs & buttons",
-  mqtt: "MQTT",
-  voice: "Voice assistant",
-  bluetooth: "Bluetooth",
-  media: "Media",
-  advanced: "Advanced",
-};
-const CATEGORY_ORDER = Object.keys(CATEGORY_LABELS);
 /** Categories shown as collapsed cards after the others. */
 const COLLAPSED: Record<string, { header: string; secondary: string }> = {
   deprecated: { header: "Deprecated", secondary: "Settings of features the app will remove" },
   other: { header: "Not described by the display", secondary: "Raw values the settings schema does not know" },
 };
 const COLLAPSED_ORDER = Object.keys(COLLAPSED);
-
-const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
-
-const categoryLabel = (c: string): string => CATEGORY_LABELS[c] ?? c.charAt(0).toUpperCase() + c.slice(1);
-
-/** Text shown in a text/number input for a value. */
-const toText = (def: SettingDef, value: unknown): string => {
-  if (value === null || value === undefined) return "";
-  if (def.type === "string_list") return Array.isArray(value) ? value.join(", ") : String(value);
-  return String(value);
-};
-
-/** Parse input text -> [ok, value]. */
-const parseText = (def: SettingDef, text: string): [boolean, unknown] => {
-  switch (def.type) {
-    case "int":
-    case "float": {
-      if (text.trim() === "") return [false, null];
-      const n = Number(text);
-      if (!Number.isFinite(n)) return [false, null];
-      if (def.type === "int" && !Number.isInteger(n)) return [false, null];
-      if (def.min !== null && def.min !== undefined && n < def.min) return [false, n];
-      if (def.max !== null && def.max !== undefined && n > def.max) return [false, n];
-      return [true, n];
-    }
-    case "string_list":
-      return [
-        true,
-        text
-          .split(",")
-          .map((v) => v.trim())
-          .filter(Boolean),
-      ];
-    default:
-      return [true, text];
-  }
-};
 
 const KEYS_MODE_OPTIONS = [
   { value: "all", label: "All portable settings" },
@@ -508,76 +453,18 @@ export class SeSettingsTab extends LitElement {
 
   private _renderControl(def: SettingDef, locked: boolean) {
     const value = this._value(def.key);
-    const invalid = this._invalid.has(def.key);
-    const secret = def.secret || this._data?.secret.includes(def.key);
-    const label = def.label ?? def.key;
     // read-only while the settings are (re)loaded: edits would be dropped by the load
     const disabled = this._loading || locked;
     if (def.accept) return this._renderFile(def, String(value ?? ""), disabled);
-    switch (def.type) {
-      case "bool":
-        return html`<ha-switch
-          .checked=${value === true}
-          .disabled=${disabled}
-          aria-label=${label}
-          @change=${(e: Event) => this._setValue(def.key, isChecked(e))}
-        ></ha-switch>`;
-      case "enum": {
-        const options = def.options ?? [];
-        const idx = options.findIndex((o) => same(o.value, value) || String(o.value) === String(value));
-        const items = options.map((o, i) => ({ value: String(i), label: o.label }));
-        if (idx < 0) items.unshift({ value: "-1", label: formatValue(value) });
-        return html`<ha-select
-          class="ctrl"
-          .label=${undefined}
-          aria-label=${label}
-          .options=${items}
-          .value=${String(idx)}
-          .disabled=${disabled}
-          @selected=${(e: SelectedEvent) => {
-            e.stopPropagation();
-            const i = Number(e.detail.value);
-            if (i >= 0 && options[i]) this._setValue(def.key, options[i].value);
-          }}
-        ></ha-select>`;
-      }
-      case "int":
-      case "float":
-        return html`<ha-input
-          class="ctrl"
-          .disabled=${disabled}
-          type="number"
-          aria-label=${label}
-          .invalid=${invalid}
-          .min=${def.min ?? undefined}
-          .max=${def.max ?? undefined}
-          .step=${def.step ?? (def.type === "int" ? 1 : "any")}
-          .value=${this._text[def.key] ?? toText(def, value)}
-          @input=${(e: Event) => this._setText(def, inputValue(e))}
-        >
-          ${def.unit ? html`<span slot="end" class="unit">${def.unit}</span>` : nothing}
-        </ha-input>`;
-      case "string_list":
-        return html`<ha-input
-          class="ctrl"
-          .disabled=${disabled}
-          aria-label=${label}
-          placeholder="value1, value2"
-          .value=${this._text[def.key] ?? toText(def, value)}
-          @input=${(e: Event) => this._setText(def, inputValue(e))}
-        ></ha-input>`;
-      default:
-        return html`<ha-input
-          class="ctrl"
-          .disabled=${disabled}
-          aria-label=${label}
-          .type=${secret ? "password" : "text"}
-          ?password-toggle=${secret}
-          autocomplete=${secret ? "new-password" : "off"}
-          .value=${value === null || value === undefined ? "" : String(value)}
-          @input=${(e: Event) => this._setValue(def.key, inputValue(e))}
-        ></ha-input>`;
-    }
+    return renderSettingControl(def, {
+      value,
+      text: this._text[def.key],
+      invalid: this._invalid.has(def.key),
+      disabled,
+      secret: def.secret || this._data?.secret.includes(def.key),
+      onValue: (v) => this._setValue(def.key, v),
+      onText: (t) => this._setText(def, t),
+    });
   }
 
   /** One setting as a list row (headline, supporting text, control at the end) like Backup → Settings. */
@@ -585,10 +472,7 @@ export class SeSettingsTab extends LitElement {
     const invalid = this._invalid.has(def.key);
     const perDevice = def.per_device || this._data?.per_device.includes(def.key);
     const managed = this._data?.managed?.[def.key];
-    const range =
-      (def.type === "int" || def.type === "float") && (def.min != null || def.max != null)
-        ? `${def.min ?? "…"} – ${def.max ?? "…"}${def.unit ? ` ${def.unit}` : ""}`
-        : "";
+    const range = rangeText(def);
     const replacement = def.replaced_by ? (ev.def(def.replaced_by)?.label ?? def.replaced_by) : "";
     const notes = [
       def.key,
@@ -619,21 +503,17 @@ export class SeSettingsTab extends LitElement {
   /** A file setting: its name plus upload (to this or every display) and remove. */
   private _renderFile(def: SettingDef, name: string, disabled: boolean) {
     return html`<span class="file-name">${name || "None"}</span>
-      <ha-button appearance="plain" size="small" .disabled=${disabled} @click=${() => this._upload(def)}>Upload…</ha-button>
+      <ha-button appearance="plain" size="s" .disabled=${disabled} @click=${() => this._upload(def)}>Upload…</ha-button>
       ${name
-        ? html`<ha-button appearance="plain" size="small" variant="danger" .disabled=${disabled} @click=${() => this._sendFile(def.key, [this.entryId], null)}
+        ? html`<ha-button appearance="plain" size="s" variant="danger" .disabled=${disabled} @click=${() => this._sendFile(def.key, [this.entryId], null)}
             >Remove</ha-button
           >`
         : nothing}`;
   }
 
   private async _upload(def: SettingDef): Promise<void> {
-    const file = await pickFile(def.accept ?? "*/*");
+    const file = await pickUpload(this, def);
     if (!file) return;
-    if (file.size > MAX_UPLOAD) {
-      toast(this, `${file.name} is larger than 512 KB`, "error");
-      return;
-    }
     const others = this.devices.filter((d) => isLoaded(d) && d.available && d.entry_id !== this.entryId);
     const everywhere =
       others.length > 0 &&
@@ -643,11 +523,8 @@ export class SeSettingsTab extends LitElement {
         confirmText: "All displays",
         dismissText: "Only this one",
       }));
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    let binary = "";
-    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     const targets = [this.entryId, ...(everywhere ? others.map((d) => d.entry_id) : [])];
-    await this._sendFile(def.key, targets, { name: file.name, data: btoa(binary) });
+    await this._sendFile(def.key, targets, { name: file.name, data: file.data_b64 });
   }
 
   private async _sendFile(key: string, targets: string[], file: { name: string; data: string } | null): Promise<void> {
@@ -689,10 +566,9 @@ export class SeSettingsTab extends LitElement {
       const cat = def.deprecated ? "deprecated" : def.category || "general";
       groups.set(cat, [...(groups.get(cat) ?? []), def]);
     }
-    const rank = (c: string) => (CATEGORY_ORDER.includes(c) ? CATEGORY_ORDER.indexOf(c) : 99);
     const cats = [...groups.keys()]
       .filter((c) => !(c in COLLAPSED))
-      .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+      .sort((a, b) => categoryRank(a) - categoryRank(b) || a.localeCompare(b));
     const collapsed = COLLAPSED_ORDER.filter((c) => groups.has(c));
     if (!cats.length && !collapsed.length) {
       return f
@@ -1008,40 +884,11 @@ export class SeSettingsTab extends LitElement {
     sharedStyles,
     pageStyles,
     dialogStyles,
+    settingRowStyles,
     css`
-      /* controls at the end of a row: ha-backup-config-schedule */
-      .end {
-        display: flex;
-        align-items: center;
-      }
-      .end ha-select {
-        min-width: 210px;
-      }
-      .file-name {
-        max-width: 160px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: var(--secondary-text-color);
-      }
-      .end ha-input {
-        width: 210px;
-        /* no space reserved for a hint (errors are shown in the supporting text): 56px like ha-select */
-        --ha-input-padding-bottom: 0;
-      }
       /* below the sticky search bar the cards start 16px down, as on Settings → System → Logs */
       .search + .content {
         padding-top: var(--ha-space-4);
-      }
-      @media all and (max-width: 450px) {
-        .end ha-select,
-        .end ha-input {
-          min-width: 160px;
-          width: 160px;
-        }
-      }
-      .unit {
-        color: var(--secondary-text-color);
       }
       .lock {
         font-style: italic;
