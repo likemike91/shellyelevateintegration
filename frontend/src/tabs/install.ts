@@ -104,13 +104,14 @@ const ANDROID_12 = 31;
 const FINAL_STEPS = ["wait_app", "provision", "config_entry"];
 
 const TAP_SEQUENCE = ["F", "H", "F", "F", "H", "F", "H", "H"];
+const TAP_SEQUENCE_V2 = [ "H", "F", "H", "H", "F", "F", "F", "F"]
 
 /** Step 1 instructions (the user-confirmed ADB steps), as config flow descriptions are written. */
 const ADB_STEPS_MARKDOWN = `ADB has to be enabled once on the display. Home Assistant then installs and sets up everything over the network.
 
 1. Connect the display to Wi‑Fi in the Shelly settings under **Network**.
 2. Update the display to the newest Shelly firmware.
-3. In the Shelly settings, open **General → About device** and tap **Firmware** (F) and **Hardware** (H) in this order: **${TAP_SEQUENCE.join(" ")}**
+3. In the Shelly settings, open **General → About device** and tap **Firmware version** (F) and **Hardware revision** (H) in this order: **${TAP_SEQUENCE.join(" ")} (< Version 2.8.4)** or **${TAP_SEQUENCE_V2.join(" ")} (\>= Version 2.8.4)**
 4. In the Android **Developer options**, enable only **ADB debugging** and **ADB over Wi‑Fi** (port 5555). On newer Shelly firmware, also turn on **ADB - WiFi** in the Shelly developer settings (it shows the display's address with port 5555). Note the IP address of the display.
 5. Enter the IP address below.`;
 
