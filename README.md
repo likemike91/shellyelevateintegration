@@ -34,12 +34,18 @@ Or add it by hand:
 
 1. Connect the display to Wi-Fi in the Shelly settings under Network.
 2. Update the display to the newest Shelly firmware.
-3. In the Shelly settings open General → About device and tap Firmware (F) and Hardware (H)
-   in this order: F H F F H F H H. This unlocks the Android settings.
-4. In the Android Developer options, turn on only ADB debugging and ADB over Wi-Fi (port 5555).
+3. In the Shelly settings open General → About device and tap Firmware version (F) and Hardware revision (H)
+   in this order:
+
+   * < 2.8.4: F H F F H F H H
+   * \>= 2.8.4: H F H H F F F F
+   
+   This unlocks the Android settings.
+
+5. In the Android Developer options, turn on only ADB debugging and ADB over Wi-Fi (port 5555).
    On newer Shelly firmware, also turn on ADB - WiFi in the Shelly developer settings
    (it shows the display's address with port 5555). Note the IP address.
-5. Open Shelly Elevate in the Home Assistant sidebar (see step 5 above if it isn't there),
+6. Open Shelly Elevate in the Home Assistant sidebar (see step 5 above if it isn't there),
    go to Install and enter the IP.
 
 Home Assistant installs the app and adds the display. To undo all of it, use
